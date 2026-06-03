@@ -25,6 +25,30 @@ if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 // In-memory render status store
 const renderJobs = {};
 
+// ─────────────────────────────────────────────
+// Helper: Kirim notifikasi ke Drive Uploader Service
+// ─────────────────────────────────────────────
+async function notifyDriveUpload(renderId, videoType, metadata = {}) {
+  const driveUploaderUrl = process.env.DRIVE_UPLOADER_URL;
+  if (!driveUploaderUrl) return null;
+  const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+  const videoUrl = `${baseUrl}/download/${renderId}`;
+  const filename = `${videoType}-${renderId}.mp4`;
+  try {
+    const axios = require('axios');
+    const resp = await axios.post(`${driveUploaderUrl}/upload-to-drive`, {
+      video_url: videoUrl,
+      filename,
+      video_type: videoType,
+      metadata: { ...metadata, created_at: new Date().toISOString() },
+    }, { timeout: 10000 });
+    return resp.data;
+  } catch (err) {
+    console.error('[Drive Upload] Gagal notifikasi:', err.message);
+    return null;
+  }
+}
+
 // Multer storage config
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
@@ -190,6 +214,10 @@ app.post('/render-text-video', async (req, res) => {
       videoUrl: `/download/${renderId}`,
       renderId,
     };
+    // Upload otomatis ke Google Drive
+    notifyDriveUpload(renderId, 'text_video', { title: sceneList[0]?.text || 'Text Video', style }).then(driveResult => {
+      if (driveResult?.view_link) renderJobs[renderId].driveUrl = driveResult.view_link;
+    });
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -338,6 +366,10 @@ app.post('/edit-video', async (req, res) => {
       videoUrl: `/download/${renderId}`,
       renderId,
     };
+    // Upload otomatis ke Google Drive
+    notifyDriveUpload(renderId, 'edited', { title: 'Edited Video' }).then(driveResult => {
+      if (driveResult?.view_link) renderJobs[renderId].driveUrl = driveResult.view_link;
+    });
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -382,6 +414,10 @@ app.post('/picture-in-picture', async (req, res) => {
       videoUrl: `/download/${renderId}`,
       renderId,
     };
+    // Upload otomatis ke Google Drive
+    notifyDriveUpload(renderId, 'pip', { title: 'Picture-in-Picture Video' }).then(driveResult => {
+      if (driveResult?.view_link) renderJobs[renderId].driveUrl = driveResult.view_link;
+    });
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -429,6 +465,10 @@ app.post('/add-subtitles', async (req, res) => {
       videoUrl: `/download/${renderId}`,
       renderId,
     };
+    // Upload otomatis ke Google Drive
+    notifyDriveUpload(renderId, 'edited', { title: 'Video with Subtitles' }).then(driveResult => {
+      if (driveResult?.view_link) renderJobs[renderId].driveUrl = driveResult.view_link;
+    });
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -483,6 +523,10 @@ app.post('/google-search-animation', async (req, res) => {
       videoUrl: `/download/${renderId}`,
       renderId,
     };
+    // Upload otomatis ke Google Drive
+    notifyDriveUpload(renderId, 'rendered', { title: `Google Search: ${searchQuery}` }).then(driveResult => {
+      if (driveResult?.view_link) renderJobs[renderId].driveUrl = driveResult.view_link;
+    });
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -552,6 +596,10 @@ app.post('/combine-videos', async (req, res) => {
       videoUrl: `/download/${renderId}`,
       renderId,
     };
+    // Upload otomatis ke Google Drive
+    notifyDriveUpload(renderId, 'merged', { title: 'Combined Video' }).then(driveResult => {
+      if (driveResult?.view_link) renderJobs[renderId].driveUrl = driveResult.view_link;
+    });
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -599,7 +647,13 @@ app.get('/templates', (req, res) => {
 // GET /health
 // ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Video Studio Backend', version: '2.0.0' });
+  res.json({ 
+    status: 'ok', 
+    service: 'Video Studio Backend', 
+    version: '3.0.0',
+    googleDriveIntegration: !!process.env.DRIVE_UPLOADER_URL,
+    driveFolderUrl: 'https://drive.google.com/drive/folders/1dXb_6JfB0XyT7wXCHGMRPW2k4b888lMQ'
+  });
 });
 
 // ─────────────────────────────────────────────
