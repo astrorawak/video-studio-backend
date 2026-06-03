@@ -1,4 +1,4 @@
-require('dotenv').config();
+'use strict';
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -7,24 +7,16 @@ const fs = require('fs');
 const { randomUUID: uuidv4 } = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
-const cloudinary = require('cloudinary').v2;
 
 // Set ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegStatic);
-
-// Cloudinary config
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
-// Upload directory
+// Upload & output directory
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const OUTPUT_DIR = path.join(__dirname, 'outputs');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -48,17 +40,11 @@ const upload = multer({
 });
 
 // ─────────────────────────────────────────────
-// Helper: Upload file ke Cloudinary
+// Helper: Buat URL publik untuk file output
 // ─────────────────────────────────────────────
-async function uploadToCloudinary(filePath, folder = 'video-studio') {
-  const result = await cloudinary.uploader.upload(filePath, {
-    resource_type: 'video',
-    folder,
-    invalidate: true,
-  });
-  // Auto-delete lokal setelah upload
-  fs.unlink(filePath, () => {});
-  return result.secure_url;
+function makeVideoUrl(req, renderId) {
+  const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+  return `${baseUrl}/download/${renderId}`;
 }
 
 // ─────────────────────────────────────────────
@@ -88,6 +74,19 @@ function getVideoInfo(filePath) {
     });
   });
 }
+
+// ─────────────────────────────────────────────
+// GET /download/:renderId  — Unduh video hasil render
+// ─────────────────────────────────────────────
+app.get('/download/:renderId', (req, res) => {
+  const outputPath = path.join(OUTPUT_DIR, `${req.params.renderId}.mp4`);
+  if (!fs.existsSync(outputPath)) {
+    return res.status(404).json({ error: 'File tidak ditemukan' });
+  }
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Disposition', `attachment; filename="${req.params.renderId}.mp4"`);
+  fs.createReadStream(outputPath).pipe(res);
+});
 
 // ─────────────────────────────────────────────
 // POST /upload
@@ -134,7 +133,6 @@ app.post('/render-text-video', async (req, res) => {
     const { scenes, style = 'cinematic', duration = 30 } = req.body;
     const outputPath = path.join(OUTPUT_DIR, `${renderId}.mp4`);
 
-    // Build FFmpeg command untuk text video
     const styleColors = {
       cinematic: { bg: 'black', text: 'white', font: 'Arial' },
       vlog: { bg: 'white', text: 'black', font: 'Arial' },
@@ -145,15 +143,13 @@ app.post('/render-text-video', async (req, res) => {
     };
     const colors = styleColors[style] || styleColors.cinematic;
 
-    // Buat video dari scenes menggunakan FFmpeg drawtext
     const sceneList = Array.isArray(scenes) ? scenes : [{ text: 'Video Studio', duration: duration }];
     const totalDuration = sceneList.reduce((sum, s) => sum + (s.duration || 3), 0);
 
-    // Generate filter complex untuk semua scenes
     let filterParts = [];
     let currentTime = 0;
 
-    sceneList.forEach((scene, i) => {
+    sceneList.forEach((scene) => {
       const sceneDur = scene.duration || 3;
       const text = (scene.text || '').replace(/'/g, "\\'").replace(/:/g, '\\:');
       const subtext = (scene.subtext || '').replace(/'/g, "\\'").replace(/:/g, '\\:');
@@ -188,9 +184,12 @@ app.post('/render-text-video', async (req, res) => {
         .run();
     });
 
-    renderJobs[renderId].progress = 95;
-    const videoUrl = await uploadToCloudinary(outputPath);
-    renderJobs[renderId] = { status: 'done', progress: 100, videoUrl };
+    renderJobs[renderId] = {
+      status: 'done',
+      progress: 100,
+      videoUrl: `/download/${renderId}`,
+      renderId,
+    };
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -209,7 +208,6 @@ app.post('/edit-video', async (req, res) => {
     const {
       trim = [],
       order = fileIds,
-      transitions = [],
       textOverlays = [],
       musicFile = null,
       musicVolume = 0.3,
@@ -219,7 +217,7 @@ app.post('/edit-video', async (req, res) => {
     const outputPath = path.join(OUTPUT_DIR, `${renderId}.mp4`);
     const tempFiles = [];
 
-    // Step 1: Trim setiap file jika ada instruksi trim
+    // Step 1: Trim
     const processedFiles = [];
     for (const fid of (order || fileIds)) {
       const srcPath = getFilePath(fid);
@@ -244,7 +242,7 @@ app.post('/edit-video', async (req, res) => {
 
     renderJobs[renderId].progress = 30;
 
-    // Step 2: Concat semua video
+    // Step 2: Concat
     const concatList = path.join(OUTPUT_DIR, `concat_${renderId}.txt`);
     const concatContent = processedFiles.map((f) => `file '${f}'`).join('\n');
     fs.writeFileSync(concatList, concatContent);
@@ -266,7 +264,7 @@ app.post('/edit-video', async (req, res) => {
 
     renderJobs[renderId].progress = 60;
 
-    // Step 3: Tambah text overlays jika ada
+    // Step 3: Text overlays
     let currentInput = concatOutput;
     if (textOverlays.length > 0) {
       const textOutput = path.join(OUTPUT_DIR, `text_${renderId}.mp4`);
@@ -293,7 +291,7 @@ app.post('/edit-video', async (req, res) => {
 
     renderJobs[renderId].progress = 80;
 
-    // Step 4: Tambah musik background jika ada
+    // Step 4: Musik background
     if (musicFile) {
       const musicPath = getFilePath(musicFile);
       const musicOutput = path.join(OUTPUT_DIR, `music_${renderId}.mp4`);
@@ -314,7 +312,7 @@ app.post('/edit-video', async (req, res) => {
       currentInput = musicOutput;
     }
 
-    // Step 5: Ubah speed jika bukan 1.0
+    // Step 5: Speed
     if (speed !== 1.0) {
       const speedOutput = path.join(OUTPUT_DIR, `speed_${renderId}.mp4`);
       tempFiles.push(speedOutput);
@@ -331,14 +329,15 @@ app.post('/edit-video', async (req, res) => {
       currentInput = speedOutput;
     }
 
-    // Copy ke output final
     fs.copyFileSync(currentInput, outputPath);
-    // Cleanup temp files
     tempFiles.forEach((f) => { try { fs.unlinkSync(f); } catch (_) {} });
 
-    renderJobs[renderId].progress = 95;
-    const videoUrl = await uploadToCloudinary(outputPath);
-    renderJobs[renderId] = { status: 'done', progress: 100, videoUrl };
+    renderJobs[renderId] = {
+      status: 'done',
+      progress: 100,
+      videoUrl: `/download/${renderId}`,
+      renderId,
+    };
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -377,8 +376,12 @@ app.post('/picture-in-picture', async (req, res) => {
         .run();
     });
 
-    const videoUrl = await uploadToCloudinary(outputPath);
-    renderJobs[renderId] = { status: 'done', progress: 100, videoUrl };
+    renderJobs[renderId] = {
+      status: 'done',
+      progress: 100,
+      videoUrl: `/download/${renderId}`,
+      renderId,
+    };
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -397,7 +400,6 @@ app.post('/add-subtitles', async (req, res) => {
     const srcPath = getFilePath(fileId);
     const outputPath = path.join(OUTPUT_DIR, `${renderId}.mp4`);
 
-    // Buat file SRT dari subtitles array
     const srtPath = path.join(OUTPUT_DIR, `${renderId}.srt`);
     const srtContent = subtitles.map((s, i) => {
       const startTime = formatSrtTime(s.start);
@@ -421,8 +423,12 @@ app.post('/add-subtitles', async (req, res) => {
     });
 
     fs.unlink(srtPath, () => {});
-    const videoUrl = await uploadToCloudinary(outputPath);
-    renderJobs[renderId] = { status: 'done', progress: 100, videoUrl };
+    renderJobs[renderId] = {
+      status: 'done',
+      progress: 100,
+      videoUrl: `/download/${renderId}`,
+      renderId,
+    };
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -471,8 +477,12 @@ app.post('/google-search-animation', async (req, res) => {
         .run();
     });
 
-    const videoUrl = await uploadToCloudinary(outputPath);
-    renderJobs[renderId] = { status: 'done', progress: 100, videoUrl };
+    renderJobs[renderId] = {
+      status: 'done',
+      progress: 100,
+      videoUrl: `/download/${renderId}`,
+      renderId,
+    };
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -487,7 +497,7 @@ app.post('/combine-videos', async (req, res) => {
   res.json({ renderId, message: 'Combine videos dimulai' });
 
   try {
-    const { fileIds, transitions = 'fade', music = null } = req.body;
+    const { fileIds, music = null } = req.body;
     const outputPath = path.join(OUTPUT_DIR, `${renderId}.mp4`);
     const tempFiles = [];
 
@@ -536,8 +546,12 @@ app.post('/combine-videos', async (req, res) => {
     fs.copyFileSync(currentOutput, outputPath);
     tempFiles.forEach((f) => { try { fs.unlinkSync(f); } catch (_) {} });
 
-    const videoUrl = await uploadToCloudinary(outputPath);
-    renderJobs[renderId] = { status: 'done', progress: 100, videoUrl };
+    renderJobs[renderId] = {
+      status: 'done',
+      progress: 100,
+      videoUrl: `/download/${renderId}`,
+      renderId,
+    };
   } catch (err) {
     renderJobs[renderId] = { status: 'error', progress: 0, error: err.message };
   }
@@ -585,7 +599,7 @@ app.get('/templates', (req, res) => {
 // GET /health
 // ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Video Studio Backend', version: '1.0.0' });
+  res.json({ status: 'ok', service: 'Video Studio Backend', version: '2.0.0' });
 });
 
 // ─────────────────────────────────────────────
@@ -601,7 +615,7 @@ function formatSrtTime(seconds) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Video Studio Backend berjalan di port ${PORT}`);
+  console.log(`Video Studio Backend v2.0 berjalan di port ${PORT}`);
 });
 
 module.exports = app;
