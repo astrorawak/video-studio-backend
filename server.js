@@ -311,7 +311,25 @@ app.post('/edit-video', async (req, res) => {
   res.json({ renderId, message: 'Editing dimulai' });
 
   try {
-    const { files: fileIds, instructions = {} } = req.body;
+    // Support kedua format: MCP (fileId singular) dan REST (files array)
+    let fileIds = req.body.files;
+    let instructions = req.body.instructions || {};
+    
+    // Format MCP: { fileId, trim, textOverlay, speed }
+    if (!fileIds && req.body.fileId) {
+      fileIds = [req.body.fileId];
+      instructions = {
+        trim: req.body.trim ? [{ fileId: req.body.fileId, ...req.body.trim }] : [],
+        textOverlays: req.body.textOverlay ? [req.body.textOverlay] : [],
+        speed: req.body.speed || 1.0,
+      };
+    }
+    
+    if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+      renderJobs[renderId] = { status: 'error', progress: 0, error: 'files atau fileId diperlukan' };
+      return;
+    }
+
     const {
       trim = [],
       order = fileIds,
