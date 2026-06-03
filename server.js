@@ -613,6 +613,204 @@ function formatSrtTime(seconds) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
 }
 
+// ─────────────────────────────────────────────
+// MCP Streamable HTTP Endpoint (untuk Claude AI web)
+// Protokol: JSON-RPC 2.0 via POST /mcp
+// ─────────────────────────────────────────────
+const MCP_TOOLS = [
+  {
+    name: 'render_text_video',
+    description: 'Buat video dari teks dengan animasi. Cocok untuk konten edukasi, lirik, tips, atau presentasi.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        scenes: { type: 'array', description: 'Array scene. Setiap scene: {type, text, subtext, duration, animation, style}' },
+        outputFormat: { type: 'string', enum: ['mp4', 'webm'], default: 'mp4' },
+        resolution: { type: 'string', enum: ['1920x1080', '1080x1920', '1280x720'], default: '1920x1080' },
+      },
+      required: ['scenes'],
+    },
+  },
+  {
+    name: 'edit_video',
+    description: 'Edit video: trim, crop, tambah teks overlay, musik background, ubah kecepatan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fileId: { type: 'string', description: 'ID file video yang sudah diupload' },
+        trim: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
+        textOverlay: { type: 'object', properties: { text: { type: 'string' }, position: { type: 'string' }, fontSize: { type: 'number' }, color: { type: 'string' }, startTime: { type: 'number' }, endTime: { type: 'number' } } },
+        speed: { type: 'number', description: 'Kecepatan video: 0.5=lambat, 1=normal, 2=cepat' },
+      },
+      required: ['fileId'],
+    },
+  },
+  {
+    name: 'combine_videos',
+    description: 'Gabungkan beberapa video menjadi satu video panjang.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fileIds: { type: 'array', items: { type: 'string' }, description: 'Array ID file video' },
+        music: { type: 'string', description: 'ID file musik background (opsional)' },
+      },
+      required: ['fileIds'],
+    },
+  },
+  {
+    name: 'picture_in_picture',
+    description: 'Tambahkan video kecil di atas video utama (picture-in-picture).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mainVideoId: { type: 'string' },
+        overlayVideoId: { type: 'string' },
+        position: { type: 'string', enum: ['top-left', 'top-right', 'bottom-left', 'bottom-right'], default: 'bottom-right' },
+        scale: { type: 'number', description: 'Ukuran overlay 0.1-0.5', default: 0.3 },
+      },
+      required: ['mainVideoId', 'overlayVideoId'],
+    },
+  },
+  {
+    name: 'add_subtitles',
+    description: 'Tambahkan subtitle/teks ke video.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fileId: { type: 'string' },
+        subtitles: { type: 'array', items: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' }, text: { type: 'string' } } } },
+      },
+      required: ['fileId', 'subtitles'],
+    },
+  },
+  {
+    name: 'google_search_animation',
+    description: 'Buat animasi tampilan pencarian Google untuk konten viral.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        searchQuery: { type: 'string' },
+        results: { type: 'array', items: { type: 'string' } },
+        style: { type: 'string', enum: ['light', 'dark'], default: 'light' },
+      },
+      required: ['searchQuery'],
+    },
+  },
+  {
+    name: 'get_templates',
+    description: 'Dapatkan daftar semua template scene, animasi, dan style preset yang tersedia.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'check_render_status',
+    description: 'Cek status render video. Gunakan renderId dari hasil render sebelumnya.',
+    inputSchema: {
+      type: 'object',
+      properties: { renderId: { type: 'string' } },
+      required: ['renderId'],
+    },
+  },
+  {
+    name: 'upload_video_url',
+    description: 'Upload video dari URL publik ke server untuk diproses.',
+    inputSchema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'URL publik video' }, filename: { type: 'string' } },
+      required: ['url'],
+    },
+  },
+];
+
+// MCP session store
+const mcpSessions = {};
+
+// GET /mcp - untuk SSE atau info
+app.get('/mcp', (req, res) => {
+  res.json({ name: 'Video Studio MCP', version: '1.0.0', tools: MCP_TOOLS.map(t => t.name) });
+});
+
+// POST /mcp - JSON-RPC 2.0 handler
+app.post('/mcp', async (req, res) => {
+  const { jsonrpc, id, method, params } = req.body;
+  
+  if (jsonrpc !== '2.0') {
+    return res.status(400).json({ jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid Request' } });
+  }
+
+  try {
+    if (method === 'initialize') {
+      const sessionId = uuidv4();
+      mcpSessions[sessionId] = { initialized: true, clientInfo: params.clientInfo };
+      return res.json({
+        jsonrpc: '2.0', id,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'video-studio-mcp', version: '1.0.0' },
+        },
+      });
+    }
+
+    if (method === 'tools/list') {
+      return res.json({ jsonrpc: '2.0', id, result: { tools: MCP_TOOLS } });
+    }
+
+    if (method === 'tools/call') {
+      const { name, arguments: args } = params;
+      const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+      let result;
+
+      if (name === 'get_templates') {
+        const templates = await require('axios').get(`${baseUrl}/templates`);
+        result = { content: [{ type: 'text', text: JSON.stringify(templates.data, null, 2) }] };
+      } else if (name === 'check_render_status') {
+        const job = renderJobs[args.renderId];
+        if (!job) return res.json({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'Render job tidak ditemukan' }] } });
+        result = { content: [{ type: 'text', text: JSON.stringify(job, null, 2) }] };
+      } else if (name === 'render_text_video') {
+        const resp = await require('axios').post(`${baseUrl}/render-text-video`, args);
+        result = { content: [{ type: 'text', text: `Render dimulai! renderId: ${resp.data.renderId}. Gunakan check_render_status untuk memantau progress. URL video: ${baseUrl}/download/${resp.data.renderId}` }] };
+      } else if (name === 'edit_video') {
+        const resp = await require('axios').post(`${baseUrl}/edit-video`, args);
+        result = { content: [{ type: 'text', text: `Edit dimulai! renderId: ${resp.data.renderId}. URL video: ${baseUrl}/download/${resp.data.renderId}` }] };
+      } else if (name === 'combine_videos') {
+        const resp = await require('axios').post(`${baseUrl}/combine-videos`, args);
+        result = { content: [{ type: 'text', text: `Combine dimulai! renderId: ${resp.data.renderId}. URL video: ${baseUrl}/download/${resp.data.renderId}` }] };
+      } else if (name === 'picture_in_picture') {
+        const resp = await require('axios').post(`${baseUrl}/picture-in-picture`, args);
+        result = { content: [{ type: 'text', text: `PiP dimulai! renderId: ${resp.data.renderId}. URL video: ${baseUrl}/download/${resp.data.renderId}` }] };
+      } else if (name === 'add_subtitles') {
+        const resp = await require('axios').post(`${baseUrl}/add-subtitles`, args);
+        result = { content: [{ type: 'text', text: `Subtitle dimulai! renderId: ${resp.data.renderId}. URL video: ${baseUrl}/download/${resp.data.renderId}` }] };
+      } else if (name === 'google_search_animation') {
+        const resp = await require('axios').post(`${baseUrl}/google-search-animation`, args);
+        result = { content: [{ type: 'text', text: `Animasi dimulai! renderId: ${resp.data.renderId}. URL video: ${baseUrl}/download/${resp.data.renderId}` }] };
+      } else if (name === 'upload_video_url') {
+        const axios = require('axios');
+        const { url, filename = 'video.mp4' } = args;
+        const response = await axios.get(url, { responseType: 'arraybuffer' });
+        const fileId = uuidv4();
+        const ext = path.extname(filename) || '.mp4';
+        const filePath = path.join(UPLOAD_DIR, `${fileId}${ext}`);
+        fs.writeFileSync(filePath, response.data);
+        result = { content: [{ type: 'text', text: `Upload berhasil! fileId: ${fileId}. Gunakan fileId ini untuk edit atau proses video.` }] };
+      } else {
+        return res.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Tool '${name}' tidak ditemukan` } });
+      }
+
+      return res.json({ jsonrpc: '2.0', id, result });
+    }
+
+    if (method === 'notifications/initialized') {
+      return res.json({ jsonrpc: '2.0', id: null, result: {} });
+    }
+
+    return res.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method '${method}' tidak dikenal` } });
+  } catch (err) {
+    return res.json({ jsonrpc: '2.0', id, error: { code: -32603, message: err.message } });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Video Studio Backend v2.0 berjalan di port ${PORT}`);
