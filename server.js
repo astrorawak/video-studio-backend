@@ -50,7 +50,7 @@ async function notifyDriveUpload(renderId, videoType, metadata = {}) {
       filename,
       video_type: videoType,
       metadata: { ...metadata, created_at: new Date().toISOString() },
-    }, { timeout: 10000 });
+    }, { timeout: 60000 });
     return resp.data;
   } catch (err) {
     console.error('[Drive Upload] Gagal notifikasi:', err.message);
