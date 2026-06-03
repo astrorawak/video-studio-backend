@@ -12,6 +12,14 @@ const sharp = require('sharp');
 // Set ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
+// Prevent service crash on uncaught errors
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '500mb' }));
@@ -223,9 +231,9 @@ app.post('/render-text-video', async (req, res) => {
       const text = scene.text || '';
       const subtext = scene.subtext || '';
 
-      // Buat frame PNG untuk scene ini
+      // Buat frame PNG untuk scene ini (1280x720 untuk hemat memory)
       const framePath = path.join(OUTPUT_DIR, `frame_${renderId}_${i}.png`);
-      const frameBuffer = await createSceneFrame(1920, 1080, colors.bg, text, subtext, colors.text);
+      const frameBuffer = await createSceneFrame(1280, 720, colors.bg, text, subtext, colors.text, 42);
       fs.writeFileSync(framePath, frameBuffer);
       tempFiles.push(framePath);
 
@@ -236,12 +244,14 @@ app.post('/render-text-video', async (req, res) => {
       await new Promise((resolve, reject) => {
         ffmpeg()
           .input(framePath)
-          .inputOptions(['-loop', '1', '-framerate', '30'])
+          .inputOptions(['-loop', '1', '-framerate', '24'])
           .outputOptions([
             '-c:v', 'libx264',
             '-t', String(sceneDur),
             '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=1920:1080',
+            '-preset', 'ultrafast',
+            '-crf', '28',
+            '-threads', '1',
           ])
           .output(sceneVideo)
           .on('end', resolve)
@@ -266,7 +276,7 @@ app.post('/render-text-video', async (req, res) => {
         ffmpeg()
           .input(concatList)
           .inputOptions(['-f', 'concat', '-safe', '0'])
-          .outputOptions(['-c:v', 'libx264', '-pix_fmt', 'yuv420p'])
+          .outputOptions(['-c', 'copy'])
           .output(outputPath)
           .on('end', resolve)
           .on('error', reject)
@@ -564,9 +574,9 @@ app.post('/google-search-animation', async (req, res) => {
     const borderColor = style === 'dark' ? '#5f6368' : '#dfe1e5';
     const descColor = style === 'dark' ? '#bdc1c6' : '#4d5156';
 
-    // Buat frame PNG yang menampilkan Google Search UI via SVG
-    const width = 1920;
-    const height = 1080;
+    // Buat frame PNG yang menampilkan Google Search UI via SVG (1280x720 hemat memory)
+    const width = 1280;
+    const height = 720;
     const safeQuery = escapeXml(searchQuery);
 
     let resultsSvg = '';
@@ -597,12 +607,14 @@ app.post('/google-search-animation', async (req, res) => {
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(framePath)
-        .inputOptions(['-loop', '1', '-framerate', '30'])
+        .inputOptions(['-loop', '1', '-framerate', '24'])
         .outputOptions([
           '-c:v', 'libx264',
           '-t', String(Math.ceil(duration)),
           '-pix_fmt', 'yuv420p',
-          '-vf', 'scale=1920:1080',
+          '-preset', 'ultrafast',
+          '-crf', '28',
+          '-threads', '1',
         ])
         .output(outputPath)
         .on('progress', (p) => { renderJobs[renderId].progress = Math.min(90, Math.round(p.percent || 0)); })
