@@ -7,6 +7,7 @@ const fs = require('fs');
 const { randomUUID: uuidv4 } = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
+const { createCanvas } = require('canvas');
 
 // Set ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegStatic);
@@ -146,6 +147,45 @@ app.post('/upload-base64', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
+// Helper: Buat frame PNG menggunakan canvas
+// ─────────────────────────────────────────────
+function createBackgroundFrame(width, height, bgColor) {
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  // Konversi warna hex 0x format ke #format
+  let color = bgColor;
+  if (color.startsWith('0x')) color = '#' + color.slice(2);
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, width, height);
+  return canvas.toBuffer('image/png');
+}
+
+function createSceneFrame(width, height, bgColor, text, subtext, textColor, fontSize = 60) {
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  // Background
+  let bg = bgColor;
+  if (bg.startsWith('0x')) bg = '#' + bg.slice(2);
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+  // Text color
+  let tc = textColor;
+  if (tc.startsWith('0x')) tc = '#' + tc.slice(2);
+  // Main text
+  ctx.fillStyle = tc;
+  ctx.font = `bold ${fontSize}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (text) ctx.fillText(text, width / 2, height / 2);
+  // Subtext
+  if (subtext) {
+    ctx.font = `${Math.round(fontSize * 0.5)}px Arial`;
+    ctx.fillText(subtext, width / 2, height / 2 + fontSize);
+  }
+  return canvas.toBuffer('image/png');
+}
+
+// ─────────────────────────────────────────────
 // POST /render-text-video
 // ─────────────────────────────────────────────
 app.post('/render-text-video', async (req, res) => {
@@ -160,53 +200,78 @@ app.post('/render-text-video', async (req, res) => {
     const styleColors = {
       cinematic: { bg: 'black', text: 'white', font: 'Arial' },
       vlog: { bg: 'white', text: 'black', font: 'Arial' },
-      business: { bg: '0x1a1a2e', text: '0xe0e0e0', font: 'Arial' },
-      music_video: { bg: '0x0d0d0d', text: '0xffd700', font: 'Arial' },
-      tutorial: { bg: '0xf5f5f5', text: '0x333333', font: 'Arial' },
-      trader: { bg: '0x0a0a0a', text: '0x00ff88', font: 'Arial' },
+      business: { bg: '#1a1a2e', text: '#e0e0e0', font: 'Arial' },
+      music_video: { bg: '#0d0d0d', text: '#ffd700', font: 'Arial' },
+      tutorial: { bg: '#f5f5f5', text: '#333333', font: 'Arial' },
+      trader: { bg: '#0a0a0a', text: '#00ff88', font: 'Arial' },
     };
     const colors = styleColors[style] || styleColors.cinematic;
 
     const sceneList = Array.isArray(scenes) ? scenes : [{ text: 'Video Studio', duration: duration }];
     const totalDuration = sceneList.reduce((sum, s) => sum + (s.duration || 3), 0);
+    const tempFiles = [];
 
-    let filterParts = [];
-    let currentTime = 0;
-
-    sceneList.forEach((scene) => {
+    // Buat video per-scene lalu concat
+    const sceneVideos = [];
+    for (let i = 0; i < sceneList.length; i++) {
+      const scene = sceneList[i];
       const sceneDur = scene.duration || 3;
-      const text = (scene.text || '').replace(/'/g, "\\'").replace(/:/g, '\\:');
-      const subtext = (scene.subtext || '').replace(/'/g, "\\'").replace(/:/g, '\\:');
-      const startT = currentTime;
-      const endT = currentTime + sceneDur;
+      const text = scene.text || '';
+      const subtext = scene.subtext || '';
 
-      filterParts.push(
-        `drawtext=text='${text}':fontcolor=${colors.text}:fontsize=60:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startT},${endT})'`
-      );
-      if (subtext) {
-        filterParts.push(
-          `drawtext=text='${subtext}':fontcolor=${colors.text}:fontsize=30:x=(w-text_w)/2:y=(h+text_h)/2+20:enable='between(t,${startT},${endT})'`
-        );
-      }
-      currentTime = endT;
-    });
+      // Buat frame PNG untuk scene ini
+      const framePath = path.join(OUTPUT_DIR, `frame_${renderId}_${i}.png`);
+      const frameBuffer = createSceneFrame(1920, 1080, colors.bg, text, subtext, colors.text);
+      fs.writeFileSync(framePath, frameBuffer);
+      tempFiles.push(framePath);
 
-    const filterComplex = filterParts.join(',');
+      // Render scene video dari gambar statis
+      const sceneVideo = path.join(OUTPUT_DIR, `scene_${renderId}_${i}.mp4`);
+      tempFiles.push(sceneVideo);
 
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(`color=${colors.bg}:size=1920x1080:duration=${totalDuration}:rate=30`)
-        .inputOptions(['-f', 'lavfi'])
-        .videoFilters(filterComplex)
-        .outputOptions(['-c:v', 'libx264', '-pix_fmt', 'yuv420p'])
-        .output(outputPath)
-        .on('progress', (p) => {
-          renderJobs[renderId].progress = Math.min(90, Math.round((p.percent || 0)));
-        })
-        .on('end', resolve)
-        .on('error', reject)
-        .run();
-    });
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(framePath)
+          .inputOptions(['-loop', '1', '-framerate', '30'])
+          .outputOptions([
+            '-c:v', 'libx264',
+            '-t', String(sceneDur),
+            '-pix_fmt', 'yuv420p',
+            '-vf', 'scale=1920:1080',
+          ])
+          .output(sceneVideo)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+
+      sceneVideos.push(sceneVideo);
+      renderJobs[renderId].progress = Math.round(((i + 1) / sceneList.length) * 70);
+    }
+
+    // Concat semua scene
+    if (sceneVideos.length === 1) {
+      fs.copyFileSync(sceneVideos[0], outputPath);
+    } else {
+      const concatList = path.join(OUTPUT_DIR, `concat_${renderId}.txt`);
+      const concatContent = sceneVideos.map(f => `file '${f}'`).join('\n');
+      fs.writeFileSync(concatList, concatContent);
+      tempFiles.push(concatList);
+
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(concatList)
+          .inputOptions(['-f', 'concat', '-safe', '0'])
+          .outputOptions(['-c:v', 'libx264', '-pix_fmt', 'yuv420p'])
+          .output(outputPath)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+    }
+
+    // Cleanup temp files
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (_) {} });
 
     renderJobs[renderId] = {
       status: 'done',
@@ -486,36 +551,93 @@ app.post('/google-search-animation', async (req, res) => {
     const { searchQuery = 'Search query', results = [], style = 'light' } = req.body;
     const outputPath = path.join(OUTPUT_DIR, `${renderId}.mp4`);
     const duration = 5 + results.length * 1.5;
+    const tempFiles = [];
 
-    const bg = style === 'dark' ? 'black' : 'white';
-    const textColor = style === 'dark' ? 'white' : 'black';
-    const queryText = searchQuery.replace(/'/g, "\\'");
+    const bgColor = style === 'dark' ? '#1a1a1a' : '#ffffff';
+    const textColor = style === 'dark' ? '#ffffff' : '#202124';
+    const linkColor = '#1a0dab';
 
-    const filters = [
-      `drawtext=text='${queryText}':fontcolor=${textColor}:fontsize=36:x=120:y=80:enable='gte(t,0.5)'`,
-    ];
+    // Buat frame PNG yang menampilkan Google Search UI
+    const width = 1920;
+    const height = 1080;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
 
-    results.slice(0, 5).forEach((result, i) => {
-      const resultText = result.replace(/'/g, "\\'").substring(0, 60);
-      const yPos = 200 + i * 80;
-      const startT = 1 + i * 1.5;
-      filters.push(
-        `drawtext=text='${resultText}':fontcolor=blue:fontsize=22:x=80:y=${yPos}:enable='gte(t,${startT})'`
-      );
+    // Background
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, width, height);
+
+    // Google logo area
+    ctx.fillStyle = style === 'dark' ? '#e8eaed' : '#4285f4';
+    ctx.font = 'bold 40px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText('Google', 80, 60);
+
+    // Search bar
+    ctx.strokeStyle = style === 'dark' ? '#5f6368' : '#dfe1e5';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    // Rounded rect manual (kompatibel semua versi canvas)
+    const rx = 80, ry = 80, rw = 800, rh = 50, rr = 25;
+    ctx.moveTo(rx + rr, ry);
+    ctx.lineTo(rx + rw - rr, ry);
+    ctx.arcTo(rx + rw, ry, rx + rw, ry + rr, rr);
+    ctx.lineTo(rx + rw, ry + rh - rr);
+    ctx.arcTo(rx + rw, ry + rh, rx + rw - rr, ry + rh, rr);
+    ctx.lineTo(rx + rr, ry + rh);
+    ctx.arcTo(rx, ry + rh, rx, ry + rh - rr, rr);
+    ctx.lineTo(rx, ry + rr);
+    ctx.arcTo(rx, ry, rx + rr, ry, rr);
+    ctx.closePath();
+    ctx.stroke();
+
+    // Search query text
+    ctx.fillStyle = textColor;
+    ctx.font = '20px Arial';
+    ctx.fillText(searchQuery, 110, 112);
+
+    // Results
+    const resultItems = results.slice(0, 5);
+    resultItems.forEach((result, i) => {
+      const yBase = 200 + i * 100;
+      // URL-like text
+      ctx.fillStyle = style === 'dark' ? '#bdc1c6' : '#202124';
+      ctx.font = '14px Arial';
+      ctx.fillText('www.example.com', 80, yBase);
+      // Title (link)
+      ctx.fillStyle = linkColor;
+      ctx.font = '20px Arial';
+      ctx.fillText(result.substring(0, 70), 80, yBase + 28);
+      // Description
+      ctx.fillStyle = style === 'dark' ? '#bdc1c6' : '#4d5156';
+      ctx.font = '16px Arial';
+      ctx.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit...', 80, yBase + 55);
     });
 
+    const framePath = path.join(OUTPUT_DIR, `gsearch_${renderId}.png`);
+    fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+    tempFiles.push(framePath);
+
+    // Render video dari gambar statis
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(`color=${bg}:size=1920x1080:duration=${duration}:rate=30`)
-        .inputOptions(['-f', 'lavfi'])
-        .videoFilters(filters.join(','))
-        .outputOptions(['-c:v', 'libx264', '-pix_fmt', 'yuv420p'])
+        .input(framePath)
+        .inputOptions(['-loop', '1', '-framerate', '30'])
+        .outputOptions([
+          '-c:v', 'libx264',
+          '-t', String(Math.ceil(duration)),
+          '-pix_fmt', 'yuv420p',
+          '-vf', 'scale=1920:1080',
+        ])
         .output(outputPath)
         .on('progress', (p) => { renderJobs[renderId].progress = Math.min(90, Math.round(p.percent || 0)); })
         .on('end', resolve)
         .on('error', reject)
         .run();
     });
+
+    // Cleanup
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (_) {} });
 
     renderJobs[renderId] = {
       status: 'done',
