@@ -7,7 +7,7 @@ const fs = require('fs');
 const { randomUUID: uuidv4 } = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
-const { createCanvas } = require('canvas');
+const sharp = require('sharp');
 
 // Set ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegStatic);
@@ -147,42 +147,46 @@ app.post('/upload-base64', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// Helper: Buat frame PNG menggunakan canvas
+// Helper: Buat frame PNG menggunakan sharp (SVG -> PNG)
 // ─────────────────────────────────────────────
-function createBackgroundFrame(width, height, bgColor) {
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  // Konversi warna hex 0x format ke #format
-  let color = bgColor;
-  if (color.startsWith('0x')) color = '#' + color.slice(2);
-  ctx.fillStyle = color;
-  ctx.fillRect(0, 0, width, height);
-  return canvas.toBuffer('image/png');
+function normalizeColor(color) {
+  if (!color) return '#000000';
+  if (color.startsWith('0x')) return '#' + color.slice(2);
+  if (color === 'black') return '#000000';
+  if (color === 'white') return '#ffffff';
+  return color;
 }
 
-function createSceneFrame(width, height, bgColor, text, subtext, textColor, fontSize = 60) {
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  // Background
-  let bg = bgColor;
-  if (bg.startsWith('0x')) bg = '#' + bg.slice(2);
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, width, height);
-  // Text color
-  let tc = textColor;
-  if (tc.startsWith('0x')) tc = '#' + tc.slice(2);
-  // Main text
-  ctx.fillStyle = tc;
-  ctx.font = `bold ${fontSize}px Arial`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  if (text) ctx.fillText(text, width / 2, height / 2);
-  // Subtext
-  if (subtext) {
-    ctx.font = `${Math.round(fontSize * 0.5)}px Arial`;
-    ctx.fillText(subtext, width / 2, height / 2 + fontSize);
+function escapeXml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+async function createBackgroundFrame(width, height, bgColor) {
+  const bg = normalizeColor(bgColor);
+  const svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${width}" height="${height}" fill="${bg}"/>
+  </svg>`;
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+async function createSceneFrame(width, height, bgColor, text, subtext, textColor, fontSize = 60) {
+  const bg = normalizeColor(bgColor);
+  const tc = normalizeColor(textColor);
+  const safeText = escapeXml(text || '');
+  const safeSubtext = escapeXml(subtext || '');
+  
+  let svgContent = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${width}" height="${height}" fill="${bg}"/>`;
+  
+  if (safeText) {
+    svgContent += `\n    <text x="${width/2}" y="${height/2}" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="bold" fill="${tc}" text-anchor="middle" dominant-baseline="middle">${safeText}</text>`;
   }
-  return canvas.toBuffer('image/png');
+  if (safeSubtext) {
+    svgContent += `\n    <text x="${width/2}" y="${height/2 + fontSize}" font-family="Arial, sans-serif" font-size="${Math.round(fontSize*0.5)}" fill="${tc}" text-anchor="middle" dominant-baseline="middle">${safeSubtext}</text>`;
+  }
+  svgContent += '\n  </svg>';
+  
+  return sharp(Buffer.from(svgContent)).png().toBuffer();
 }
 
 // ─────────────────────────────────────────────
@@ -221,7 +225,7 @@ app.post('/render-text-video', async (req, res) => {
 
       // Buat frame PNG untuk scene ini
       const framePath = path.join(OUTPUT_DIR, `frame_${renderId}_${i}.png`);
-      const frameBuffer = createSceneFrame(1920, 1080, colors.bg, text, subtext, colors.text);
+      const frameBuffer = await createSceneFrame(1920, 1080, colors.bg, text, subtext, colors.text);
       fs.writeFileSync(framePath, frameBuffer);
       tempFiles.push(framePath);
 
@@ -556,66 +560,37 @@ app.post('/google-search-animation', async (req, res) => {
     const bgColor = style === 'dark' ? '#1a1a1a' : '#ffffff';
     const textColor = style === 'dark' ? '#ffffff' : '#202124';
     const linkColor = '#1a0dab';
+    const logoColor = style === 'dark' ? '#e8eaed' : '#4285f4';
+    const borderColor = style === 'dark' ? '#5f6368' : '#dfe1e5';
+    const descColor = style === 'dark' ? '#bdc1c6' : '#4d5156';
 
-    // Buat frame PNG yang menampilkan Google Search UI
+    // Buat frame PNG yang menampilkan Google Search UI via SVG
     const width = 1920;
     const height = 1080;
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
+    const safeQuery = escapeXml(searchQuery);
 
-    // Background
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, width, height);
-
-    // Google logo area
-    ctx.fillStyle = style === 'dark' ? '#e8eaed' : '#4285f4';
-    ctx.font = 'bold 40px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText('Google', 80, 60);
-
-    // Search bar
-    ctx.strokeStyle = style === 'dark' ? '#5f6368' : '#dfe1e5';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    // Rounded rect manual (kompatibel semua versi canvas)
-    const rx = 80, ry = 80, rw = 800, rh = 50, rr = 25;
-    ctx.moveTo(rx + rr, ry);
-    ctx.lineTo(rx + rw - rr, ry);
-    ctx.arcTo(rx + rw, ry, rx + rw, ry + rr, rr);
-    ctx.lineTo(rx + rw, ry + rh - rr);
-    ctx.arcTo(rx + rw, ry + rh, rx + rw - rr, ry + rh, rr);
-    ctx.lineTo(rx + rr, ry + rh);
-    ctx.arcTo(rx, ry + rh, rx, ry + rh - rr, rr);
-    ctx.lineTo(rx, ry + rr);
-    ctx.arcTo(rx, ry, rx + rr, ry, rr);
-    ctx.closePath();
-    ctx.stroke();
-
-    // Search query text
-    ctx.fillStyle = textColor;
-    ctx.font = '20px Arial';
-    ctx.fillText(searchQuery, 110, 112);
-
-    // Results
+    let resultsSvg = '';
     const resultItems = results.slice(0, 5);
     resultItems.forEach((result, i) => {
       const yBase = 200 + i * 100;
-      // URL-like text
-      ctx.fillStyle = style === 'dark' ? '#bdc1c6' : '#202124';
-      ctx.font = '14px Arial';
-      ctx.fillText('www.example.com', 80, yBase);
-      // Title (link)
-      ctx.fillStyle = linkColor;
-      ctx.font = '20px Arial';
-      ctx.fillText(result.substring(0, 70), 80, yBase + 28);
-      // Description
-      ctx.fillStyle = style === 'dark' ? '#bdc1c6' : '#4d5156';
-      ctx.font = '16px Arial';
-      ctx.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit...', 80, yBase + 55);
+      const safeResult = escapeXml(result.substring(0, 70));
+      resultsSvg += `
+      <text x="80" y="${yBase}" font-family="Arial, sans-serif" font-size="14" fill="${descColor}">www.example.com</text>
+      <text x="80" y="${yBase + 28}" font-family="Arial, sans-serif" font-size="20" fill="${linkColor}">${safeResult}</text>
+      <text x="80" y="${yBase + 55}" font-family="Arial, sans-serif" font-size="16" fill="${descColor}">Lorem ipsum dolor sit amet, consectetur adipiscing elit...</text>`;
     });
 
+    const svgContent = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${width}" height="${height}" fill="${bgColor}"/>
+      <text x="80" y="60" font-family="Arial, sans-serif" font-size="40" font-weight="bold" fill="${logoColor}">Google</text>
+      <rect x="80" y="80" width="800" height="50" rx="25" ry="25" fill="none" stroke="${borderColor}" stroke-width="2"/>
+      <text x="110" y="112" font-family="Arial, sans-serif" font-size="20" fill="${textColor}">${safeQuery}</text>
+      ${resultsSvg}
+    </svg>`;
+
     const framePath = path.join(OUTPUT_DIR, `gsearch_${renderId}.png`);
-    fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+    const frameBuffer = await sharp(Buffer.from(svgContent)).png().toBuffer();
+    fs.writeFileSync(framePath, frameBuffer);
     tempFiles.push(framePath);
 
     // Render video dari gambar statis
