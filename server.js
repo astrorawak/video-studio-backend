@@ -40,7 +40,7 @@ const renderJobs = {};
 async function notifyDriveUpload(renderId, videoType, metadata = {}) {
   const driveUploaderUrl = process.env.DRIVE_UPLOADER_URL;
   if (!driveUploaderUrl) return null;
-  const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+  const baseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://video-studio-backend-iae0.onrender.com';
   const videoUrl = `${baseUrl}/download/${renderId}`;
   const filename = `${videoType}-${renderId}.mp4`;
   try {
